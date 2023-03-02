@@ -30,6 +30,7 @@ function usage() {
     echo "The parameters list:"
     echo "  --ns <namespace name>                : Default <ent>                       ; Use namespace for all installation"
     echo "  --app <app name>                     : Default <quickstart>                ; Use app name to generate valid name resource"
+    echo "  --proto <protocol>                   : Default <http>                      ; Use protocol to make requests to endpoint"
     echo "  --primary                            : Default no primary                  ; Enable primary for label and installation"
     echo "  --tn <tenant1>                       : no Default                          ; Select the name to use for tenant, ignored if set primary"
     echo "  --host <hostname>                    : Default <10.131.132.235.nip.io> ; Use hostname to configure entando"
@@ -38,6 +39,7 @@ function usage() {
     echo "  --client-secret <kc client secret>   : no Default                          ; Use client secret inside REST calls"
     echo "  --filename <file name>               : Default <entando-data.tar.gz>       ; Use file name for upload and decompress to CDS"
     echo "  --filepath <file path>               : Default </tmp/entando-data.tar.gz>  ; Use file path for upload to CDS"
+    echo "  --ingress-class <ingress class>      : no Default                          ; Use ingress class (e.g. nginx) inside ingress"
     echo "  --help                               : print this help"
 }
 
@@ -47,6 +49,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     "--ns") NS_OVERRIDE="$2";shift;;
     "--app") APP_OVERRIDE="$2";shift;;
+    "--proto") PROTO_OVERRIDE="$2";shift;;
     "--tn") TN_OVERRIDE="$2";shift;;    
     "--primary") 
          PRIMARY_OVERRIDE="true"
@@ -58,6 +61,7 @@ while [ "$#" -gt 0 ]; do
     "--client-secret") CLIENT_SECRET_OVERRIDE="$2";shift;;
     "--filename") FILE_NAME_OVERRIDE="$2";shift;;
     "--filepath") FILE_PATH_OVERRIDE="$2";shift;;
+    "--ingress-class") INGRESS_CLASS="$2";shift;;
     "--help") usage; exit 3;;
     "--"*) echo "Undefined argument \"$1\"" 1>&2; usage; exit 3;;
   esac
@@ -66,6 +70,7 @@ done
 
 NS="${NS_OVERRIDE:-ent}"
 APP="${APP_OVERRIDE:-quickstart}"
+PROTO="${PROTO_OVERRIDE:-http}"
 PRIMARY="${PRIMARY_OVERRIDE:-false}"
 TN="${TN_OVERRIDE}"
 HOST="${HOST_OVERRIDE:-10.131.132.143.nip.io}"
@@ -78,6 +83,7 @@ FILE_PATH="${FILE_PATH_OVERRIDE:-/tmp/entando-data.tar.gz}"
 echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 echo "> NS:             $NS"
 echo "> APP:            $APP"
+echo "> PROTO:          $PROTO"
 echo "> PRIMARY:        $PRIMARY"
 echo "> TN:             $TN"
 echo "> HOST:           $HOST"
@@ -86,7 +92,16 @@ echo "> CLIENT_ID:      $CLIENT_ID"
 echo "> CLIENT_SECRET:  $CLIENT_SECRET"
 echo "> FILE_NAME:      $FILE_NAME"
 echo "> FILE_PATH:      $FILE_PATH"
+echo "> INGRESS_CLASS:  $INGRESS_CLASS"
 echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+
+
+
+if [[ -n "$INGRESS_CLASS" ]]
+then
+  INGRESS_CLASS_FIELD="ingressClassName: ${INGRESS_CLASS}"
+fi
+
 
 [ -z "$TN" ] && errorMessage "You must select primary o tenant name" -1
 [ -z "$CLIENT_SECRET" ] && errorMessage "You must set client secret" -1
@@ -117,7 +132,7 @@ set -e
 
 echo ""
 echo "==== Fetch keycloak pubkey ===="
-KC_PUB_KEY=$(curl -s --request GET http://$APP.$HOST/auth/realms/entando | jq -r .public_key)
+KC_PUB_KEY=$(curl -s --request GET $PROTO://$APP.$HOST/auth/realms/entando | jq -r .public_key)
 echo "kc public key:$KC_PUB_KEY"
 
 CDS_MANIFESTS=$(cat <<EOF
@@ -256,8 +271,9 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-body-size: "150m"
     nginx.org/client-max-body-size: "150m"
 spec:
+  $INGRESS_CLASS_FIELD
   rules:
-    - host: cds.$HOST
+    - host: cds-$APP.$HOST
       http:
         paths:
           - backend:
@@ -276,7 +292,7 @@ spec:
             path: /api/v1/
 #  tls:
 #    - hosts:
-#        - cds.k8s-entando.org
+#        - cds-$APP.$HOST
 #      secretName: cds-tls
 ---
 EOF
@@ -288,18 +304,18 @@ echo "$CDS_MANIFESTS"
 echo "$CDS_MANIFESTS" | kubectl apply -n "${NS}" -f -
 
 echo ""
-echo "==== Wait 10 secs for cds $TN ===="
-sleep 15
+echo "==== Wait 60 secs for cds $TN ===="
+sleep 60
 
 echo ""
 echo "==== Retrieve access token ===="
-ACCESS_TOKEN=$(curl -d "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET"  -X POST http://$APP.$HOST/auth/realms/entando/protocol/openid-connect/token -s | jq -r .access_token)
+ACCESS_TOKEN=$(curl -d "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET"  -X POST $PROTO://$APP.$HOST/auth/realms/entando/protocol/openid-connect/token -s | jq -r .access_token)
 echo $ACCESS_TOKEN
 
 echo ""
-echo "==== upload file $FILE_NAME in http://cds.$HOST/api/v1/upload/ ===="
+echo "==== upload file $FILE_NAME in http://cds-$APP.$HOST/api/v1/upload/ ===="
 
-curl --location --request POST "http://cds.$HOST/api/v1/upload/" \
+curl --location --request POST "http://cds-$APP.$HOST/api/v1/upload/" \
      --header "Authorization: Bearer $ACCESS_TOKEN" \
      --form 'path="archives"' \
      --form 'protected="false"' \
@@ -310,9 +326,9 @@ curl --location --request POST "http://cds.$HOST/api/v1/upload/" \
 
 echo ""
 echo ""
-echo "==== decompress file $FILE_NAME http://cds.$HOST/api/v1/utils/decompress/$FILE_NAME ===="
+echo "==== decompress file $FILE_NAME http://cds-$APP.$HOST/api/v1/utils/decompress/$FILE_NAME ===="
 
-curl --location -X GET "http://cds.$HOST/api/v1/utils/decompress/$FILE_NAME" \
+curl --location -X GET "http://cds-$APP.$HOST/api/v1/utils/decompress/$FILE_NAME" \
      --header "Authorization: Bearer $ACCESS_TOKEN" 
 
 echo ""
